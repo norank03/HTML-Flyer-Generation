@@ -1,8 +1,10 @@
 import torch
 from diffusers import DiffusionPipeline
-from typing import List
+from typing import List, Dict
 
-# Load Stable Diffusion once globally (for efficiency)
+# ============================================================
+# Load Stable Diffusion pipeline globally for efficiency
+# ============================================================
 pipe = DiffusionPipeline.from_pretrained(
     "runwayml/stable-diffusion-v1-5",
     torch_dtype=torch.float16,
@@ -11,48 +13,93 @@ pipe = DiffusionPipeline.from_pretrained(
 
 pipe.enable_xformers_memory_efficient_attention()
 
-# ---------------------------------------------------------
-# Node Definition
-# ---------------------------------------------------------
+
+# ============================================================
+# Image Generator Node — generates flyer background + stickers
+# ============================================================
 def image_generator_node(state: "FlyerState") -> "FlyerState":
     """
-    Generates flyer sticker images using Stable Diffusion.
-    Prompts and number of images are extracted from the previous node's state.
+    Generates the flyer background and decorative stickers
+    using Stable Diffusion based on the flyer theme and image prompts.
+
+    Expects from state:
+    - 'user_prompt': original user input about flyer
+    - 'flyer_theme': short description of flyer’s theme (e.g., 'luxurious perfume launch flyer')
+    - 'image_prompt_plan': dict from IMAGE_PROMPT_GENERATOR with:
+        {
+          "background_prompt": "...",
+          "stickers": ["...", "..."],
+          "color_palette_hint": "..."
+        }
     """
 
     try:
-        theme = state.get("flyer_theme", "technology flyer")
-        num_stickers = state.get("num_stickers", 4)
-        concepts: List[str] = state.get(
-            "sticker_concepts",
-            ["AI", "robot hand", "futuristic laptop", "neon globe"],
+        # -------------------------------------------------------
+        # Step 1. Extract info from pipeline state
+        # -------------------------------------------------------
+        user_prompt = state.get("user_prompt", "modern flyer design")
+        flyer_theme = state.get("flyer_theme", "premium technology flyer")
+        image_prompt_plan: Dict = state.get("image_prompt_plan", {})
+
+        background_prompt = image_prompt_plan.get(
+            "background_prompt",
+            f"{flyer_theme}, elegant composition, cinematic lighting, 8k art"
         )
+        sticker_prompts: List[str] = image_prompt_plan.get(
+            "stickers",
+            ["iconic emblem", "decorative logo", "abstract accent"]
+        )
+        color_hint = image_prompt_plan.get("color_palette_hint", "soft lighting, metallic tones")
 
-        # Log
-        state.log(f"🎨 [image_generator_node] Generating {num_stickers} images for theme: '{theme}'")
+        state.log(f"🎨 [image_generator_node] Starting image generation for theme: '{flyer_theme}'")
+        state.log(f"🪄 Color Mood: {color_hint}")
 
-        generated_images = []
+        generated_images = {}
 
-        for i in range(num_stickers):
-            # Compose a natural prompt
-            concept = concepts[i % len(concepts)]
-            prompt = f"{concept} design for a {theme} flyer, futuristic, clean lighting, professional aesthetic"
-            state.log(f"🖼️ Generating image {i+1}/{num_stickers}: '{prompt}'")
+        # -------------------------------------------------------
+        # Step 2. Generate Background Image
+        # -------------------------------------------------------
+        bg_full_prompt = f"{background_prompt}, {color_hint}, detailed texture, professional flyer background"
+        state.log(f"🖼️ Generating background: '{bg_full_prompt}'")
 
-            img = pipe(
-                prompt,
+        bg_image = pipe(
+            bg_full_prompt,
+            num_inference_steps=40,
+            guidance_scale=7.5,
+        ).images[0]
+        bg_path = "flyer_background.png"
+        bg_image.save(bg_path)
+        generated_images["background"] = bg_path
+        state.log(f"✅ Background saved as {bg_path}")
+
+        torch.cuda.empty_cache()
+
+        # -------------------------------------------------------
+        # Step 3. Generate Sticker / Decorative Images
+        # -------------------------------------------------------
+        sticker_paths = []
+        for i, concept in enumerate(sticker_prompts):
+            sticker_prompt = f"{concept}, elegant {flyer_theme} style, {color_hint}, isolated, transparent background feel"
+            state.log(f"🎯 Generating sticker {i+1}/{len(sticker_prompts)}: '{sticker_prompt}'")
+
+            sticker_image = pipe(
+                sticker_prompt,
                 num_inference_steps=30,
-                guidance_scale=7.5,
+                guidance_scale=8.0,
             ).images[0]
 
-            file_path = f"flyer_part_{i}.png"
-            img.save(file_path)
-            generated_images.append(file_path)
+            sticker_path = f"flyer_sticker_{i+1}.png"
+            sticker_image.save(sticker_path)
+            sticker_paths.append(sticker_path)
+            state.log(f"✅ Saved {sticker_path}")
 
-            state.log(f"✅ Saved {file_path}")
-            torch.cuda.empty_cache()  # clear VRAM
+            torch.cuda.empty_cache()
 
-        # Update state
+        generated_images["stickers"] = sticker_paths
+
+        # -------------------------------------------------------
+        # Step 4. Update state
+        # -------------------------------------------------------
         state["generated_images"] = generated_images
         state.log("🚀 [image_generator_node] Image generation completed successfully.")
 
